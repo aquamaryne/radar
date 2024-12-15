@@ -18,7 +18,7 @@ GPIO.setup(SERVO_PIN, GPIO.OUT)
 servo = GPIO.PWM(SERVO_PIN, 50)
 servo.start(0)
 
-# Функция для измерения расстояния
+
 def measure_distance():
     GPIO.output(TRIG, True)
     time.sleep(0.00001)

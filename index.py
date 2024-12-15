@@ -3,7 +3,6 @@ import time
 import matplotlib.pyplot as plt
 import numpy as np
 
-# Настройка пинов
 TRIG = 23
 ECHO = 24
 SERVO_PIN = 18
@@ -34,7 +33,7 @@ def set_angle(angle):
 def scan_and_visualize():
     angles = []
     distances = []
-    for angle in range(0, 181, 5):  # Полукруговой радар
+    for angle in range(0, 181, 5):  
         set_angle(angle)
         distance = measure_distance()
         print(f"Угол: {angle}, Расстояние: {distance} см")

@@ -1,132 +1,167 @@
-use rppal::gpio::{Gpio, OutputPin, InputPin, Level};
-use rppal::pwm::{Pwm, Channel};
-use std::time::{Duration, Instant};
-use std::thread;
-use std::error::Error;
-use plotters::prelude::*;
-use std::f64::consts::PI;
+#include <iostream>
+#include <fstream>
+#include <cmath>
+#include <vector>
+#include <chrono>
+#include <thread>
+#include <wiringPi.h>
+#include <softPwm.h>
+#include <unistd.h>
+#include <cstdlib>
+#include <string>
 
-// GPIO Pin definitions
-const TRIG: u8 = 23;
-const ECHO: u8 = 24;
-const PIR: u8 = 4;
-const SERVO_PIN: u8 = 18;
+// Constants for GPIO pins
+#define TRIG 23
+#define ECHO 24
+#define PIR 4
+#define SERVO_PIN 18
 
-fn main() -> Result<(), Box<dyn Error>> {
-    // Initialize GPIO
-    let gpio = Gpio::new()?;
-    let mut trig_pin = gpio.get(TRIG)?.into_output();
-    let echo_pin = gpio.get(ECHO)?.into_input();
-    let pir_pin = gpio.get(PIR)?.into_input();
+// Function prototypes
+double measureDistance();
+void setAngle(int angle);
+void radarScan();
+void saveDataForPlotting(const std::vector<int>& angles, const std::vector<double>& distances);
+
+int main() {
+    // Initialize wiringPi
+    if (wiringPiSetupGpio() == -1) {
+        std::cerr << "Failed to initialize wiringPi." << std::endl;
+        return 1;
+    }
+
+    // Setup GPIO pins
+    pinMode(TRIG, OUTPUT);
+    pinMode(ECHO, INPUT);
+    pinMode(PIR, INPUT);
     
-    // Initialize PWM for servo
-    let mut servo = Pwm::with_frequency(
-        Channel::Pwm0,
-        50.0,
-        0.0,
-        rppal::pwm::Polarity::Normal,
-        true,
-    )?;
+    // Initialize servo using softPwm
+    softPwmCreate(SERVO_PIN, 0, 200);
     
-    // Run radar scan
-    radar_scan(&mut trig_pin, &echo_pin, &pir_pin, &mut servo)?;
+    std::cout << "Starting radar system..." << std::endl;
+    radarScan();
     
-    Ok(())
+    return 0;
 }
 
-fn measure_distance(trig_pin: &mut OutputPin, echo_pin: &InputPin) -> f64 {
-    // Trigger pulse
-    trig_pin.set_high();
-    thread::sleep(Duration::from_micros(10));
-    trig_pin.set_low();
+// Measure distance using ultrasonic sensor
+double measureDistance() {
+    // Send trigger pulse
+    digitalWrite(TRIG, HIGH);
+    usleep(10); // 10 microseconds
+    digitalWrite(TRIG, LOW);
     
-    // Wait for echo start
-    let mut start = Instant::now();
-    while echo_pin.read() == Level::Low {
-        start = Instant::now();
-        // Add timeout check in production code
+    // Wait for echo to start
+    auto startTime = std::chrono::high_resolution_clock::now();
+    auto endTime = startTime;
+    
+    // Wait for echo pin to go HIGH (pulse start)
+    while (digitalRead(ECHO) == LOW) {
+        startTime = std::chrono::high_resolution_clock::now();
+        // Add timeout to prevent infinite loop
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::high_resolution_clock::now() - endTime).count();
+        if (duration > 100) return -1; // Timeout after 100ms
     }
     
-    // Wait for echo end
-    let mut end = start;
-    while echo_pin.read() == Level::High {
-        end = Instant::now();
-        // Add timeout check in production code
+    // Wait for echo pin to go LOW (pulse end)
+    while (digitalRead(ECHO) == HIGH) {
+        endTime = std::chrono::high_resolution_clock::now();
+        // Add timeout to prevent infinite loop
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::high_resolution_clock::now() - startTime).count();
+        if (duration > 100) return -1; // Timeout after 100ms
     }
     
-    // Calculate distance
-    let duration = end.duration_since(start);
-    let seconds = duration.as_secs_f64();
-    seconds * 34300.0 / 2.0 // Speed of sound / 2 (roundtrip)
+    // Calculate duration in seconds
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
+        endTime - startTime).count() / 1000000.0;
+    
+    // Calculate distance (speed of sound = 34300 cm/s, divide by 2 for two-way trip)
+    return duration * 34300.0 / 2.0;
 }
 
-fn set_angle(servo: &mut Pwm, angle: f64) -> Result<(), Box<dyn Error>> {
-    // Convert angle to duty cycle (same formula as Python version)
-    let duty = 2.0 + (angle / 18.0);
-    servo.set_duty_cycle(duty / 100.0)?;
-    thread::sleep(Duration::from_millis(200));
-    Ok(())
+// Set servo angle
+void setAngle(int angle) {
+    // Convert angle to pulse width
+    // Map 0-180 degrees to 5-25 (0.5ms to 2.5ms pulse width)
+    int pulseWidth = 5 + (angle * 20) / 180;
+    softPwmWrite(SERVO_PIN, pulseWidth);
+    
+    // Give servo time to move
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
 }
 
-fn radar_scan(
-    trig_pin: &mut OutputPin,
-    echo_pin: &InputPin,
-    pir_pin: &InputPin,
-    servo: &mut Pwm,
-) -> Result<(), Box<dyn Error>> {
-    // Setup for polar plot
-    let root = BitMapBackend::new("radar_scan.png", (800, 600)).into_drawing_area();
+// Main radar scanning function
+void radarScan() {
+    std::vector<int> angles;
+    std::vector<double> distances;
     
-    // Run scan loop
-    let mut angles: Vec<f64> = Vec::new();
-    let mut distances: Vec<f64> = Vec::new();
-    
-    println!("Starting radar scan (press Ctrl+C to stop)...");
-    
-    loop {
-        angles.clear();
-        distances.clear();
-        root.fill(&RGBColor(0, 69, 69))?;
-        
-        // Scan from 0 to 180 degrees
-        for angle in (0..=180).step_by(5) {
-            set_angle(servo, angle as f64)?;
-            let distance = measure_distance(trig_pin, echo_pin);
-            let pir_signal = pir_pin.read() == Level::High;
+    try {
+        while (true) {
+            angles.clear();
+            distances.clear();
             
-            if pir_signal {
-                println!("Живой объект! Угол: {}°, Расстояние: {:.2} см", angle, distance);
-                angles.push((angle as f64) * PI / 180.0); // Convert to radians
-                distances.push(distance);
+            // Scan from 0 to 180 degrees
+            for (int angle = 0; angle <= 180; angle += 5) {
+                setAngle(angle);
+                double distance = measureDistance();
+                bool pirSignal = digitalRead(PIR);
+                
+                if (pirSignal) {
+                    std::cout << "Live object! Angle: " << angle 
+                              << "°, Distance: " << distance << " cm" << std::endl;
+                    angles.push_back(angle);
+                    distances.push_back(distance);
+                }
             }
-        }
-        
-        // Plot the results
-        let max_distance = if distances.is_empty() { 100.0 } else { 
-            *distances.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap() * 1.2
-        };
-        
-        let mut chart = ChartBuilder::on(&root)
-            .margin(10)
-            .build_cartesian_2d(-PI..PI, 0.0..max_distance)?
-            .set_polar();
             
-        chart.configure_mesh().draw()?;
-        
-        chart.draw_series(
-            angles.iter().zip(distances.iter()).map(|(&angle, &distance)| {
-                Circle::new((angle, distance), 5, &RED)
-            }),
-        )?;
-        
-        root.present()?;
-        thread::sleep(Duration::from_millis(10));
+            // Save data for external plotting
+            saveDataForPlotting(angles, distances);
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << std::endl;
     }
     
-    // This code would handle cleanup in a real scenario
-    // (We won't reach here because of the infinite loop, but in a real app we'd catch Ctrl+C)
-    // servo.set_duty_cycle(0.0)?;
-    
-    #[allow(unreachable_code)]
-    Ok(())
+    // Cleanup
+    std::cout << "Shutting down radar..." << std::endl;
+    softPwmStop(SERVO_PIN);
+}
+
+// Save radar data to file for external plotting
+void saveDataForPlotting(const std::vector<int>& angles, const std::vector<double>& distances) {
+    std::ofstream dataFile("radar_data.txt");
+    if (dataFile.is_open()) {
+        dataFile << "Angle,Distance\n";
+        for (size_t i = 0; i < angles.size(); ++i) {
+            dataFile << angles[i] << "," << distances[i] << "\n";
+        }
+        dataFile.close();
+        std::cout << "Data saved for plotting" << std::endl;
+        
+        // Generate plotting script
+        std::ofstream scriptFile("plot_radar.py");
+        if (scriptFile.is_open()) {
+            scriptFile << "import numpy as np\n";
+            scriptFile << "import matplotlib.pyplot as plt\n";
+            scriptFile << "import pandas as pd\n\n";
+            scriptFile << "data = pd.read_csv('radar_data.txt')\n";
+            scriptFile << "angles = np.radians(data['Angle'])\n";
+            scriptFile << "distances = data['Distance']\n\n";
+            scriptFile << "fig, ax = plt.subplots(subplot_kw={'projection': 'polar'})\n";
+            scriptFile << "ax.set_theta_zero_location('N')\n";
+            scriptFile << "ax.set_theta_direction(-1)\n";
+            scriptFile << "ax.set_thetamin(0)\n";
+            scriptFile << "ax.set_thetamax(180)\n";
+            scriptFile << "ax.scatter(angles, distances, color='red', s=30)\n";
+            scriptFile << "ax.set_facecolor('#004545')\n";
+            scriptFile << "plt.savefig('radar_plot.png')\n";
+            scriptFile << "plt.show()\n";
+            scriptFile.close();
+            
+            // Attempt to run the plot script
+            system("python3 plot_radar.py &");
+        }
+    } else {
+        std::cerr << "Unable to open file for data saving" << std::endl;
+    }
 }
